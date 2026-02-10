@@ -3,7 +3,7 @@ use crate::{
         outgoing_handler,
         types::{IncomingRequest, OutgoingBody, OutgoingRequest, RequestOptions},
     },
-    body::{write_to_outgoing_body, Body},
+    body::{stream_to_outgoing_body, write_to_outgoing_body, Body},
     header::HeaderMap,
     ErrorCode, Method, Response,
 };
@@ -215,7 +215,7 @@ impl Request {
         &self.uri.authority
     }
 
-    fn send(self) -> Result<Response> {
+    fn send(mut self) -> Result<Response> {
         let req = OutgoingRequest::new(self.headers.try_into()?);
         req.set_method(&self.method)
             .map_err(|()| anyhow!("failed to set method"))?;
@@ -242,8 +242,16 @@ impl Request {
             .map_err(|()| anyhow!("failed to set connect_timeout"))?;
         let future_response = outgoing_handler::handle(req, Some(options))?;
 
-        let body = self.body.bytes()?;
-        write_to_outgoing_body(&outgoing_body, body.as_slice())?;
+        // Handle body - stream if it's a reader, otherwise load bytes
+        match &mut self.body {
+            Body::Reader(reader) => {
+                stream_to_outgoing_body(&outgoing_body, reader.as_mut())?;
+            }
+            _ => {
+                let body = self.body.bytes()?;
+                write_to_outgoing_body(&outgoing_body, body.as_slice())?;
+            }
+        }
         OutgoingBody::finish(outgoing_body, None)?;
 
         let incoming_response = match future_response.get() {

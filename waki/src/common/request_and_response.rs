@@ -1,14 +1,16 @@
 #[cfg(feature = "multipart")]
-use crate::multipart::{parser::parse, Form, Part};
+use crate::multipart::{parser::parse, Form, Part, StreamingForm};
 use crate::{
     body::Body,
     header::{AsHeaderName, HeaderMap, HeaderValue, IntoHeaderName, CONTENT_TYPE},
     Request, RequestBuilder, Response, ResponseBuilder,
 };
 use anyhow::{anyhow, Error, Result};
+#[cfg(feature = "json")]
 use serde::Serialize;
 use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::io::Read;
 
 macro_rules! impl_common_get_methods {
     ($($t:ty),+ $(,)?) => ($(
@@ -296,3 +298,72 @@ macro_rules! impl_common_set_methods {
 }
 
 impl_common_set_methods!(RequestBuilder, ResponseBuilder);
+
+// Streaming body methods for RequestBuilder only
+impl RequestBuilder {
+    /// Set a streaming body from any `impl Read` source.
+    ///
+    /// This allows large bodies to be streamed in chunks without loading
+    /// the entire content into memory. Works with files, readers, etc.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use std::fs::File;
+    /// use waki::Client;
+    ///
+    /// let file = File::open("large_file.bin")?;
+    /// let resp = Client::new()
+    ///     .post("https://example.com/upload")
+    ///     .header("Content-Type", "application/octet-stream")
+    ///     .streaming_body(file)
+    ///     .send()?;
+    /// ```
+    pub fn streaming_body<R: Read + Send + 'static>(mut self, reader: R) -> Self {
+        if let Ok(ref mut inner) = self.inner {
+            inner.body = Body::Reader(Box::new(reader));
+        }
+        self
+    }
+
+    /// Set a streaming multipart/form-data body.
+    ///
+    /// Unlike `multipart()` which loads everything into memory, this method
+    /// streams the multipart body in chunks. Use this for large file uploads.
+    ///
+    /// # Optional
+    ///
+    /// This requires the `multipart` feature enabled.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use std::fs::File;
+    /// use waki::{Client, multipart::{StreamingForm, StreamingPart}};
+    ///
+    /// let file = File::open("large_file.bin")?;
+    /// let form = StreamingForm::new()
+    ///     .text("key", "value")
+    ///     .part(
+    ///         StreamingPart::from_reader("file", file)
+    ///             .filename("large_file.bin")
+    ///             .mime_str("application/octet-stream")?
+    ///     );
+    ///
+    /// let resp = Client::new()
+    ///     .post("https://example.com/upload")
+    ///     .streaming_multipart(form)
+    ///     .send()?;
+    /// ```
+    #[cfg(feature = "multipart")]
+    pub fn streaming_multipart(mut self, form: StreamingForm) -> Self {
+        if let Ok(ref mut inner) = self.inner {
+            inner.headers.insert(
+                CONTENT_TYPE,
+                format!("multipart/form-data; boundary={}", form.boundary())
+                    .parse()
+                    .unwrap(),
+            );
+            inner.body = Body::Reader(Box::new(form.into_reader()));
+        }
+        self
+    }
+}
